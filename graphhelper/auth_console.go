@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -226,15 +227,24 @@ func (g *GraphHelper) HandleRedirectCallbackWithPKCE(userID, code, codeVerifier 
 	expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
 	g.storeMutex.Lock()
-	defer g.storeMutex.Unlock()
-
-	g.tokenStore[userID] = UserToken{
+	userToken := UserToken{
 		UserID:       userID,
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		ExpiresAt:    expiresAt,
 		Scope:        tokenResp.Scope,
 		TokenType:    tokenResp.TokenType,
+	}
+	g.tokenStore[userID] = userToken
+	g.storeMutex.Unlock()
+
+	// DB에 토큰 저장 (DB가 초기화된 경우)
+	if g.tokenStorage != nil {
+		if err := g.tokenStorage.SaveToken(userToken); err != nil {
+			log.Printf("경고: DB에 토큰 저장 실패: %v", err)
+		} else {
+			fmt.Printf("사용자 %s의 토큰이 DB에 저장되었습니다\n", userID)
+		}
 	}
 
 	fmt.Printf("사용자 %s 인증 성공\n", userID)

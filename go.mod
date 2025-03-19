@@ -20,6 +20,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
+	github.com/mattn/go-sqlite3 v1.14.24 // indirect
 	github.com/microsoft/kiota-abstractions-go v1.9.0 // indirect
 	github.com/microsoft/kiota-http-go v1.5.0 // indirect
 	github.com/microsoft/kiota-serialization-form-go v1.1.0 // indirect

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -150,6 +151,7 @@ type GraphHelper struct {
 	storeMutex    sync.Mutex           // 동시성 제어
 	oauthEndpoint string               // OAuth 엔드포인트
 	defaultUserID string               // 기본 사용자 ID (호환성 유지용)
+	tokenStorage  *TokenStorage        // DB 토큰 저장소
 }
 
 func NewGraphHelper() (*GraphHelper, error) {
@@ -198,7 +200,6 @@ func (g *GraphHelper) AuthenticateUser(userID string) error {
 	expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
 	g.storeMutex.Lock()
-	defer g.storeMutex.Unlock()
 	fmt.Println("tokenResp.AccessToken", tokenResp.AccessToken)
 	fmt.Println("tokenResp.RefreshToken", tokenResp.RefreshToken)
 	g.tokenStore[userID] = UserToken{
@@ -208,6 +209,17 @@ func (g *GraphHelper) AuthenticateUser(userID string) error {
 		ExpiresAt:    expiresAt,
 		Scope:        tokenResp.Scope,
 		TokenType:    tokenResp.TokenType,
+	}
+	token := g.tokenStore[userID]
+	g.storeMutex.Unlock()
+
+	// DB에 토큰 저장 (DB가 초기화된 경우)
+	if g.tokenStorage != nil {
+		if err := g.tokenStorage.SaveToken(token); err != nil {
+			log.Printf("경고: DB에 토큰 저장 실패: %v", err)
+		} else {
+			fmt.Printf("사용자 %s의 토큰이 DB에 저장되었습니다\n", userID)
+		}
 	}
 
 	fmt.Printf("사용자 %s 인증 성공\n", userID)
@@ -310,7 +322,24 @@ func (g *GraphHelper) GetUserTokenById(userID string) (string, error) {
 	storedToken, exists := g.tokenStore[userID]
 	g.storeMutex.Unlock()
 
-	// 토큰이 존재하지 않으면 인증 필요
+	// 토큰이 존재하지 않으면 DB에서 로드 시도
+	if !exists && g.tokenStorage != nil {
+		token, err := g.tokenStorage.LoadToken(userID)
+		if err != nil {
+			return "", fmt.Errorf("DB에서 토큰 로드 실패: %v", err)
+		}
+
+		if token != nil {
+			g.storeMutex.Lock()
+			g.tokenStore[userID] = *token
+			storedToken = *token
+			exists = true
+			g.storeMutex.Unlock()
+			fmt.Printf("사용자 %s의 토큰이 DB에서 로드되었습니다\n", userID)
+		}
+	}
+
+	// 여전히 토큰이 없으면 인증 필요
 	if !exists {
 		return "", fmt.Errorf("user %s not authenticated, please call AuthenticateUser first", userID)
 	}
@@ -340,6 +369,15 @@ func (g *GraphHelper) GetUserTokenById(userID string) (string, error) {
 		}
 		storedToken = g.tokenStore[userID]
 		g.storeMutex.Unlock()
+
+		// DB에 업데이트된 토큰 저장
+		if g.tokenStorage != nil {
+			if err := g.tokenStorage.SaveToken(storedToken); err != nil {
+				log.Printf("경고: DB에 토큰 업데이트 실패: %v", err)
+			} else {
+				fmt.Printf("사용자 %s의 토큰이 DB에 업데이트되었습니다\n", userID)
+			}
+		}
 
 		fmt.Println("토큰이 성공적으로 갱신되었습니다.")
 	}
@@ -797,4 +835,9 @@ func NewGraphHelperForWeb() (*GraphHelper, error) {
 		oauthEndpoint: fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0", tenantID),
 		defaultUserID: "default_user",
 	}, nil
+}
+
+// SetDefaultUserID sets the default user ID for the GraphHelper
+func (g *GraphHelper) SetDefaultUserID(userID string) {
+	g.defaultUserID = userID
 }
