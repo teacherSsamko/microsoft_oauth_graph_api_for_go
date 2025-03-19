@@ -160,12 +160,12 @@ func startLocalServer(expectedState string, resultChan chan AuthResult) (*http.S
 			error := r.URL.Query().Get("error")
 			errorDesc := r.URL.Query().Get("error_description")
 			resultChan <- AuthResult{Error: fmt.Sprintf("%s: %s", error, errorDesc)}
-			w.Write([]byte(fmt.Sprintf("인증 실패: %s - %s", error, errorDesc)))
+			fmt.Fprintf(w, "인증 실패: %s - %s", error, errorDesc)
 			return
 		}
 
 		// 성공 응답
-		w.Write([]byte("인증 성공! 이 창을 닫으셔도 됩니다."))
+		fmt.Fprint(w, "인증 성공! 이 창을 닫으셔도 됩니다.")
 
 		// 결과 전송 (한 번만)
 		once.Do(func() {
@@ -227,6 +227,7 @@ func (g *GraphHelper) HandleRedirectCallbackWithPKCE(userID, code, codeVerifier 
 	expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
 	g.storeMutex.Lock()
+	defer g.storeMutex.Unlock()
 	userToken := UserToken{
 		UserID:       userID,
 		AccessToken:  tokenResp.AccessToken,
@@ -236,7 +237,6 @@ func (g *GraphHelper) HandleRedirectCallbackWithPKCE(userID, code, codeVerifier 
 		TokenType:    tokenResp.TokenType,
 	}
 	g.tokenStore[userID] = userToken
-	g.storeMutex.Unlock()
 
 	// DB에 토큰 저장 (DB가 초기화된 경우)
 	if g.tokenStorage != nil {

@@ -17,8 +17,6 @@ const (
 	nonceSize = 24 // secretbox nonce 크기
 )
 
-var defaultEncryptionKey = []byte("defaultSecretKeyFor1234567890123456") // 32바이트
-
 // TokenCrypto는 토큰 암호화 및 복호화를 담당합니다.
 type TokenCrypto struct {
 	key [keySize]byte
@@ -39,7 +37,7 @@ func NewTokenCrypto() (*TokenCrypto, error) {
 		copy(keyBytes[:], keySlice)
 	} else {
 		// 환경 변수가 설정되지 않았으면 기본 키 사용
-		copy(keyBytes[:], defaultEncryptionKey)
+		return nil, fmt.Errorf("암호화 키가 설정되지 않았습니다. TOKEN_ENCRYPTION_KEY 환경 변수를 설정하세요")
 	}
 
 	return &TokenCrypto{key: keyBytes}, nil
