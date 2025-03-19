@@ -2,8 +2,10 @@ package graphhelper
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -11,7 +13,8 @@ import (
 
 // TokenStorage는 SQLite를 사용하여 토큰을 저장하고 로드하는 구현을 제공합니다.
 type TokenStorage struct {
-	db *sql.DB
+	db     *sql.DB
+	crypto *TokenCrypto // 토큰 암호화 및 복호화를 위한 객체
 }
 
 // NewTokenStorage는 새로운 TokenStorage 인스턴스를 생성합니다.
@@ -26,11 +29,7 @@ func NewTokenStorage(dbPath string) (*TokenStorage, error) {
 	createTableSQL := `
 	CREATE TABLE IF NOT EXISTS user_tokens (
 		user_id TEXT PRIMARY KEY,
-		access_token TEXT NOT NULL,
-		refresh_token TEXT NOT NULL,
-		expires_at TIMESTAMP NOT NULL,
-		scope TEXT NOT NULL,
-		token_type TEXT NOT NULL,
+		encrypted_token TEXT NOT NULL,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
@@ -41,7 +40,14 @@ func NewTokenStorage(dbPath string) (*TokenStorage, error) {
 		return nil, fmt.Errorf("테이블 생성 실패: %v", err)
 	}
 
-	return &TokenStorage{db: db}, nil
+	// 암호화 인스턴스 생성
+	crypto, err := NewTokenCrypto()
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("암호화 초기화 실패: %v", err)
+	}
+
+	return &TokenStorage{db: db, crypto: crypto}, nil
 }
 
 // Close는 데이터베이스 연결을 닫습니다.
@@ -49,11 +55,23 @@ func (ts *TokenStorage) Close() error {
 	return ts.db.Close()
 }
 
-// SaveToken은 사용자 토큰을 데이터베이스에 저장합니다.
+// SaveToken은 사용자 토큰을 암호화하여 데이터베이스에 저장합니다.
 func (ts *TokenStorage) SaveToken(token UserToken) error {
+	// 토큰을 JSON으로 직렬화
+	tokenJson, err := json.Marshal(token)
+	if err != nil {
+		return fmt.Errorf("토큰 직렬화 실패: %v", err)
+	}
+
+	// 토큰 데이터 암호화
+	encryptedToken, err := ts.crypto.Encrypt(tokenJson)
+	if err != nil {
+		return fmt.Errorf("토큰 암호화 실패: %v", err)
+	}
+
 	// 기존 토큰이 있는지 확인
 	var exists bool
-	err := ts.db.QueryRow("SELECT 1 FROM user_tokens WHERE user_id = ?", token.UserID).Scan(&exists)
+	err = ts.db.QueryRow("SELECT 1 FROM user_tokens WHERE user_id = ?", token.UserID).Scan(&exists)
 
 	if err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("토큰 조회 중 오류: %v", err)
@@ -62,24 +80,17 @@ func (ts *TokenStorage) SaveToken(token UserToken) error {
 	// 현재 시간
 	now := time.Now()
 
-	// 만료 시간을 RFC3339 형식의 문자열로 변환
-	expiresAtStr := token.ExpiresAt.Format(time.RFC3339)
-
 	if err == sql.ErrNoRows {
 		// 토큰 추가
 		insertSQL := `
 		INSERT INTO user_tokens (
-			user_id, access_token, refresh_token, expires_at, scope, token_type, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			user_id, encrypted_token, created_at, updated_at
+		) VALUES (?, ?, ?, ?)
 		`
 		_, err = ts.db.Exec(
 			insertSQL,
 			token.UserID,
-			token.AccessToken,
-			token.RefreshToken,
-			expiresAtStr,
-			token.Scope,
-			token.TokenType,
+			encryptedToken,
 			now,
 			now,
 		)
@@ -90,21 +101,13 @@ func (ts *TokenStorage) SaveToken(token UserToken) error {
 		// 토큰 업데이트
 		updateSQL := `
 		UPDATE user_tokens SET
-			access_token = ?,
-			refresh_token = ?,
-			expires_at = ?,
-			scope = ?,
-			token_type = ?,
+			encrypted_token = ?,
 			updated_at = ?
 		WHERE user_id = ?
 		`
 		_, err = ts.db.Exec(
 			updateSQL,
-			token.AccessToken,
-			token.RefreshToken,
-			expiresAtStr,
-			token.Scope,
-			token.TokenType,
+			encryptedToken,
 			now,
 			token.UserID,
 		)
@@ -116,26 +119,18 @@ func (ts *TokenStorage) SaveToken(token UserToken) error {
 	return nil
 }
 
-// LoadToken은 사용자 ID로 토큰을 로드합니다.
+// LoadToken은 사용자 ID로 암호화된 토큰을 로드하고 복호화합니다.
 func (ts *TokenStorage) LoadToken(userID string) (*UserToken, error) {
 	query := `
-	SELECT user_id, access_token, refresh_token, expires_at, scope, token_type
+	SELECT encrypted_token
 	FROM user_tokens
 	WHERE user_id = ?
 	`
 	row := ts.db.QueryRow(query, userID)
 
-	var token UserToken
-	var expiresAt string // SQLite에서 시간을 문자열로 처리
+	var encryptedToken string
 
-	err := row.Scan(
-		&token.UserID,
-		&token.AccessToken,
-		&token.RefreshToken,
-		&expiresAt,
-		&token.Scope,
-		&token.TokenType,
-	)
+	err := row.Scan(&encryptedToken)
 
 	if err == sql.ErrNoRows {
 		return nil, nil // 토큰 없음
@@ -143,27 +138,17 @@ func (ts *TokenStorage) LoadToken(userID string) (*UserToken, error) {
 		return nil, fmt.Errorf("토큰 로드 실패: %v", err)
 	}
 
-	// 여러 가능한 시간 형식으로 파싱 시도
-	var parsedTime time.Time
-	formats := []string{
-		time.RFC3339,                          // "2006-01-02T15:04:05Z07:00"
-		"2006-01-02 15:04:05.999999999-07:00", // 원래 형식
-		"2006-01-02T15:04:05.999999999Z07:00", // 다른 가능한 형식
+	// 암호화된 토큰 복호화
+	tokenJson, err := ts.crypto.Decrypt(encryptedToken)
+	if err != nil {
+		return nil, fmt.Errorf("토큰 복호화 실패: %v", err)
 	}
 
-	var parseErr error
-	for _, format := range formats {
-		parsedTime, parseErr = time.Parse(format, expiresAt)
-		if parseErr == nil {
-			break
-		}
+	// JSON 파싱
+	var token UserToken
+	if err := json.Unmarshal(tokenJson, &token); err != nil {
+		return nil, fmt.Errorf("토큰 역직렬화 실패: %v", err)
 	}
-
-	if parseErr != nil {
-		return nil, fmt.Errorf("토큰 만료 시간 파싱 실패: %v (시간: %s)", parseErr, expiresAt)
-	}
-
-	token.ExpiresAt = parsedTime
 
 	return &token, nil
 }
@@ -227,6 +212,12 @@ func (g *GraphHelper) InitDB(dbPath string) error {
 			log.Printf("사용자 %s의 토큰이 만료되어 리프레시 시도합니다", userID)
 			tokenResp, err := g.refreshToken(token.RefreshToken)
 			if err != nil {
+				// 리프레시 토큰도 만료된 경우
+				if isRefreshTokenExpired(err) {
+					log.Printf("사용자 %s의 리프레시 토큰이 만료되었습니다. 재인증이 필요합니다.", userID)
+					// 토큰을 메모리에 로드하지 않음
+					continue
+				}
 				log.Printf("사용자 %s의 토큰 리프레시 실패: %v", userID, err)
 				continue
 			}
@@ -254,6 +245,26 @@ func (g *GraphHelper) InitDB(dbPath string) error {
 	}
 
 	return nil
+}
+
+// isRefreshTokenExpired는 에러 메시지를 확인하여 리프레시 토큰이 만료되었는지 판단합니다.
+func isRefreshTokenExpired(err error) bool {
+	// Microsoft OAuth 에러 메시지 확인
+	errorMsg := err.Error()
+	refreshTokenExpiredErrors := []string{
+		"refresh token has expired",
+		"AADSTS700082",         // 리프레시 토큰 만료
+		"AADSTS50173",          // 리프레시 토큰 만료
+		"invalid_grant",        // 일반적인 OAuth 에러 코드
+		"interaction_required", // 사용자 상호작용 필요
+	}
+
+	for _, errText := range refreshTokenExpiredErrors {
+		if strings.Contains(errorMsg, errText) {
+			return true
+		}
+	}
+	return false
 }
 
 // SaveUserTokenToDB는 현재 메모리에 있는 사용자 토큰을 DB에 저장합니다
@@ -293,6 +304,11 @@ func (g *GraphHelper) LoadUserTokenFromDB(userID string) error {
 		fmt.Printf("사용자 %s의 토큰이 만료되어 리프레시합니다\n", userID)
 		tokenResp, err := g.refreshToken(token.RefreshToken)
 		if err != nil {
+			// 리프레시 토큰도 만료된 경우
+			if isRefreshTokenExpired(err) {
+				g.tokenStorage.DeleteToken(userID)
+				return fmt.Errorf("리프레시 토큰이 만료되었습니다. 재인증이 필요합니다")
+			}
 			return fmt.Errorf("토큰 리프레시 실패: %v", err)
 		}
 
@@ -326,4 +342,25 @@ func (g *GraphHelper) ListDBUsers() ([]string, error) {
 	}
 
 	return g.tokenStorage.ListUsers()
+}
+
+// DeleteUserToken은 특정 사용자의 토큰을 DB에서 삭제합니다
+func (g *GraphHelper) DeleteUserToken(userID string) error {
+	if g.tokenStorage == nil {
+		return fmt.Errorf("토큰 스토리지가 초기화되지 않았습니다")
+	}
+
+	// 데이터베이스에서 삭제
+	err := g.tokenStorage.DeleteToken(userID)
+	if err != nil {
+		return err
+	}
+
+	// 메모리에서도 삭제
+	g.storeMutex.Lock()
+	delete(g.tokenStore, userID)
+	g.storeMutex.Unlock()
+
+	fmt.Printf("사용자 %s의 토큰이 삭제되었습니다\n", userID)
+	return nil
 }

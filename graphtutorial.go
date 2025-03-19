@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"graphtutorial/graphhelper"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -52,13 +53,13 @@ func main() {
 		fmt.Println("0. 종료")
 		fmt.Println("1. Device Code Flow 인증 - 다른 기기에서 코드 입력")
 		fmt.Println("2. Authorization Code Flow 인증 - 브라우저 자동 열기")
-		fmt.Println("3. 액세스 토큰 표시")
-		fmt.Println("4. 받은 편지함 목록 보기")
-		fmt.Println("5. 이메일 보내기")
-		fmt.Println("6. 리프레시 토큰 표시")
-		fmt.Println("7. DB에서 사용자 토큰 로드")
-		fmt.Println("8. 현재 사용자 토큰을 DB에 저장")
-		fmt.Println("9. DB에 저장된 사용자 목록 표시")
+		fmt.Println("3. 받은 편지함 목록 보기")
+		fmt.Println("4. 이메일 보내기")
+		fmt.Println("5. DB에서 사용자 토큰 로드")
+		fmt.Println("6. 현재 사용자 토큰을 DB에 저장")
+		fmt.Println("7. DB에 저장된 사용자 목록 표시")
+		fmt.Println("8. 토큰 삭제")
+		fmt.Println("9. 새 암호화 키 생성")
 
 		_, err = fmt.Scanf("%d", &choice)
 		if err != nil {
@@ -75,19 +76,19 @@ func main() {
 			initializeGraphAuthCode(graphHelper)
 			greetUser(graphHelper)
 		case 3:
-			displayAccessToken(graphHelper)
-		case 4:
 			listInbox(graphHelper)
-		case 5:
+		case 4:
 			sendMail(graphHelper)
-		case 6:
-			displayRefreshToken(graphHelper)
-		case 7:
+		case 5:
 			loadUserTokenFromDB(graphHelper)
-		case 8:
+		case 6:
 			saveUserTokenToDB(graphHelper)
-		case 9:
+		case 7:
 			listDBUsers(graphHelper)
+		case 8:
+			deleteUserToken(graphHelper)
+		case 9:
+			generateNewEncryptionKey()
 		default:
 			fmt.Println("Invalid choice! Please try again.")
 		}
@@ -117,7 +118,8 @@ func initializeGraphAuthCode(graphHelper *graphhelper.GraphHelper) {
 func greetUser(graphHelper *graphhelper.GraphHelper) {
 	user, err := graphHelper.GetUser()
 	if err != nil {
-		log.Panicf("Error getting user: %v\n", err)
+		handleTokenError(err)
+		return
 	}
 
 	fmt.Printf("Hello, %s!\n", *user.GetDisplayName())
@@ -134,33 +136,49 @@ func greetUser(graphHelper *graphhelper.GraphHelper) {
 func displayAccessToken(graphHelper *graphhelper.GraphHelper) {
 	token, err := graphHelper.GetUserToken()
 	if err != nil {
-		log.Panicf("Error getting user token: %v\n", err)
+		handleTokenError(err)
+		return
 	}
 
-	fmt.Printf("User token: %s\n", *token)
+	// 토큰의 일부만 표시 (보안상의 이유로)
+	tokenStr := *token
+	if len(tokenStr) > 50 {
+		tokenStr = tokenStr[:50] + "..." // 앞부분 50자만 표시
+	}
+
+	fmt.Printf("액세스 토큰: %s\n", tokenStr)
 	fmt.Println()
 }
 
 func displayRefreshToken(graphHelper *graphhelper.GraphHelper) {
 	token, err := graphHelper.GetUserRefreshToken()
 	if err != nil {
-		log.Panicf("Error getting user refresh token: %v\n", err)
+		handleTokenError(err)
+		return
+	}
+
+	// 토큰의 일부만 표시 (보안상의 이유로)
+	tokenStr := *token
+	if len(tokenStr) > 50 {
+		tokenStr = tokenStr[:50] + "..." // 앞부분 50자만 표시
 	}
 
 	fmt.Println()
-	fmt.Printf("Refresh token: %s\n", *token)
+	fmt.Printf("리프레시 토큰: %s\n", tokenStr)
 	fmt.Println()
 }
 
 func listInbox(graphHelper *graphhelper.GraphHelper) {
 	messages, err := graphHelper.GetInbox()
 	if err != nil {
-		log.Panicf("Error getting user's inbox: %v\n", err)
+		handleTokenError(err)
+		return
 	}
 
 	location, err := time.LoadLocation("Local")
 	if err != nil {
-		log.Panicf("Error loading local timezone: %v\n", err)
+		log.Printf("타임존 로드 실패: %v\n", err)
+		location = time.UTC
 	}
 
 	for _, message := range messages.GetValue() {
@@ -188,7 +206,8 @@ func listInbox(graphHelper *graphhelper.GraphHelper) {
 func sendMail(graphHelper *graphhelper.GraphHelper) {
 	user, err := graphHelper.GetUser()
 	if err != nil {
-		log.Panicf("Error getting user: %v\n", err)
+		handleTokenError(err)
+		return
 	}
 
 	email := user.GetMail()
@@ -200,7 +219,8 @@ func sendMail(graphHelper *graphhelper.GraphHelper) {
 	body := "Hello world!"
 	err = graphHelper.SendMail(&subject, &body, email)
 	if err != nil {
-		log.Panicf("Error sending mail: %v\n", err)
+		handleTokenError(err)
+		return
 	}
 
 	fmt.Println("Mail sent successfully")
@@ -240,6 +260,11 @@ func loadUserTokenFromDB(graphHelper *graphhelper.GraphHelper) {
 	// 토큰 로드
 	err = graphHelper.LoadUserTokenFromDB(userID)
 	if err != nil {
+		// 리프레시 토큰 만료 체크
+		if strings.Contains(err.Error(), "리프레시 토큰이 만료되었습니다") {
+			fmt.Printf("사용자 %s의 리프레시 토큰이 만료되었습니다. 다시 인증해주세요.\n", userID)
+			return
+		}
 		log.Printf("토큰 로드 실패: %v", err)
 		return
 	}
@@ -287,4 +312,91 @@ func listDBUsers(graphHelper *graphhelper.GraphHelper) {
 	for i, userID := range users {
 		fmt.Printf("%d. %s\n", i+1, userID)
 	}
+}
+
+func deleteUserToken(graphHelper *graphhelper.GraphHelper) {
+	// 저장된 사용자 목록 조회
+	users, err := graphHelper.ListDBUsers()
+	if err != nil {
+		log.Printf("사용자 목록 조회 실패: %v", err)
+		return
+	}
+
+	if len(users) == 0 {
+		fmt.Println("DB에 저장된 사용자가 없습니다.")
+		return
+	}
+
+	// 사용자 목록 표시
+	fmt.Println("DB에 저장된 사용자 목록:")
+	for i, userID := range users {
+		fmt.Printf("%d. %s\n", i+1, userID)
+	}
+
+	// 사용자 선택
+	var choice int
+	fmt.Print("삭제할 사용자 번호를 선택하세요: ")
+	_, err = fmt.Scanf("%d", &choice)
+	if err != nil || choice < 1 || choice > len(users) {
+		fmt.Println("잘못된 선택입니다.")
+		return
+	}
+
+	userID := users[choice-1]
+
+	// 확인
+	var confirm string
+	fmt.Printf("사용자 %s의 토큰을 삭제하시겠습니까? (y/n): ", userID)
+	_, err = fmt.Scanf("%s", &confirm)
+	if err != nil || (confirm != "y" && confirm != "Y") {
+		fmt.Println("토큰 삭제가 취소되었습니다.")
+		return
+	}
+
+	// 토큰 삭제
+	err = graphHelper.DeleteUserToken(userID)
+	if err != nil {
+		log.Printf("토큰 삭제 실패: %v", err)
+		return
+	}
+
+	fmt.Printf("사용자 %s의 토큰이 삭제되었습니다.\n", userID)
+}
+
+func generateNewEncryptionKey() {
+	key, err := graphhelper.GenerateEncryptionKey()
+	if err != nil {
+		log.Printf("암호화 키 생성 실패: %v", err)
+		return
+	}
+
+	fmt.Println("새 암호화 키가 생성되었습니다.")
+	fmt.Println("이 키를 안전한 곳에 보관하고 환경 변수 TOKEN_ENCRYPTION_KEY에 설정하세요:")
+	fmt.Println(key)
+	fmt.Println("\n주의: 키를 변경하면 기존에 암호화된 토큰은 더 이상 사용할 수 없습니다.")
+}
+
+// 토큰 관련 에러 처리 함수
+func handleTokenError(err error) {
+	if err == nil {
+		return
+	}
+
+	// 리프레시 토큰 만료 에러 확인
+	if strings.Contains(err.Error(), "리프레시 토큰이 만료되었습니다") {
+		fmt.Println("인증 세션이 만료되었습니다. 다시 로그인해주세요.")
+		fmt.Println("메뉴에서 1번 또는 2번을 선택하여 다시 인증해주세요.")
+		return
+	}
+
+	// 인증되지 않은 사용자
+	if strings.Contains(err.Error(), "not authenticated") ||
+		strings.Contains(err.Error(), "인증되지 않았습니다") {
+		fmt.Println("인증되지 않은 사용자입니다. 먼저 로그인해주세요.")
+		fmt.Println("메뉴에서 1번 또는 2번을 선택하여 인증해주세요.")
+		return
+	}
+
+	// 기타 에러
+	log.Printf("오류 발생: %v", err)
 }

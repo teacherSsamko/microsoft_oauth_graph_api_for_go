@@ -341,7 +341,7 @@ func (g *GraphHelper) GetUserTokenById(userID string) (string, error) {
 
 	// 여전히 토큰이 없으면 인증 필요
 	if !exists {
-		return "", fmt.Errorf("user %s not authenticated, please call AuthenticateUser first", userID)
+		return "", fmt.Errorf("사용자 %s가 인증되지 않았습니다. AuthenticateUser 또는 AuthorizeWithBrowser를 호출하세요", userID)
 	}
 
 	// 토큰이 만료되었거나 만료 임박한 경우 리프레시
@@ -351,14 +351,26 @@ func (g *GraphHelper) GetUserTokenById(userID string) (string, error) {
 		// 리프레시 토큰으로 새 토큰 얻기
 		tokenResp, err := g.refreshToken(storedToken.RefreshToken)
 		if err != nil {
-			return "", fmt.Errorf("token refresh failed: %v", err)
+			// 리프레시 토큰 만료 여부 확인
+			if isRefreshTokenExpired(err) {
+				// 리프레시 토큰이 만료되면 토큰 삭제 및 재인증 유도
+				if g.tokenStorage != nil {
+					_ = g.tokenStorage.DeleteToken(userID)
+				}
+
+				g.storeMutex.Lock()
+				delete(g.tokenStore, userID)
+				g.storeMutex.Unlock()
+
+				return "", fmt.Errorf("리프레시 토큰이 만료되었습니다. 다시 인증해야 합니다: %v", err)
+			}
+			return "", fmt.Errorf("토큰 리프레시 실패: %v", err)
 		}
 
 		// 새 토큰 저장
 		expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
 		g.storeMutex.Lock()
-		fmt.Println("tokenResp.RefreshToken", tokenResp.RefreshToken)
 		g.tokenStore[userID] = UserToken{
 			UserID:       userID,
 			AccessToken:  tokenResp.AccessToken,
